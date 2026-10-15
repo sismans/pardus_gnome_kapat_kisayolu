@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Name=Hızlı Kapat
+GenericName=Bilgisayarı Kapat
+Comment=Pardus 25 GNOME için bilgisayarı kapatma onay penceresi
+Exec=hizli-kapat
+Icon=system-shutdown
+Terminal=false
+Categories=System;
+Keywords=kapat;kapatma;güç;shutdown;poweroff;
+Actions=KisayolKur;Hakkinda;
+
+[Desktop Action KisayolKur]
+Name=Süper+K kısayolunu kur
+Exec=hizli-kapat --kisayol-kur
+
+[Desktop Action Hakkinda]
+Name=Hakkında
+Exec=hizli-kapat --hakkinda

@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Hızlı Kapat - Pardus 25 GNOME için bilgisayarı kapatma onay penceresi.
+
+Telif Hakkı (c) 2026 Süleyman ŞİŞMAN
+Lisans: MIT (LICENSE dosyasına bakın)
+"""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+
+import gi
+
+gi.require_version("Gdk", "3.0")
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+
+SURUM = "1.0.0"
+YAZAR = "Süleyman ŞİŞMAN"
+UYGULAMA_ADI = "Hızlı Kapat"
+ACIKLAMA = "Pardus 25 GNOME için bilgisayarı kapatma onay penceresi"
+PROGRAM = "hizli-kapat"
+VARSAYILAN_TUS = "<Super>k"
+
+MEDIA_KEYS = "org.gnome.settings-daemon.plugins.media-keys"
+OZEL_SEMA = MEDIA_KEYS + ".custom-keybinding"
+OZEL_YOL = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom%d/"
+
+# Çakışma kontrolü için taranan GNOME kısayol şemaları.
+KISAYOL_SEMALARI = (
+    "org.gnome.desktop.wm.keybindings",
+    "org.gnome.shell.keybindings",
+    "org.gnome.mutter.keybindings",
+    "org.gnome.mutter.wayland.keybindings",
+    MEDIA_KEYS,
+)
+
+
+class HataMesaji(Exception):
+    """Kullanıcıya olduğu gibi gösterilebilecek hata."""
+
+
+# --------------------------------------------------------------------------
+# Kapatma
+# --------------------------------------------------------------------------
+
+def bilgisayari_kapat(deneme=False):
+    """Bilgisayarı kapatır. Komut başarılı olursa True döner."""
+    komutlar = (
+        ["systemctl", "poweroff"],
+        ["gnome-session-quit", "--power-off", "--no-prompt"],
+    )
+    if deneme:
+        print("[deneme] çalıştırılacak komut:", " ".join(komutlar[0]))
+        return True
+    for komut in komutlar:
+        if shutil.which(komut[0]) is None:
+            continue
+        if subprocess.run(komut).returncode == 0:
+            return True
+    return False
+
+
+def onay_sor():
+    """Onay penceresini gösterir. Yalnızca 'Kapat'a basılırsa True döner."""
+    pencere = Gtk.MessageDialog(
+        message_type=Gtk.MessageType.QUESTION,
+        buttons=Gtk.ButtonsType.NONE,
+        text="Bilgisayarı kapatmak istiyor musunuz?",
+    )
+    pencere.format_secondary_text(
+        "Açık olan çalışmalarınızı kaydettiğinizden emin olun."
+    )
+    pencere.set_title("Bilgisayarı Kapat")
+    pencere.set_icon_name("system-shutdown")
+    pencere.set_position(Gtk.WindowPosition.CENTER)
+
+    iptal = pencere.add_button("İptal", Gtk.ResponseType.CANCEL)
+    kapat = pencere.add_button("Kapat", Gtk.ResponseType.OK)
+    kapat.get_style_context().add_class("destructive-action")
+    # Yanlışlıkla Enter'a basılırsa bilgisayar kapanmasın.
+    pencere.set_default_response(Gtk.ResponseType.CANCEL)
+    iptal.grab_focus()
+
+    yanit = pencere.run()
+    pencere.destroy()
+    return yanit == Gtk.ResponseType.OK
+
+
+def hakkinda_goster():
+    pencere = Gtk.AboutDialog()
+    pencere.set_program_name(UYGULAMA_ADI)
+    pencere.set_version(SURUM)
+    pencere.set_comments(ACIKLAMA)
+    pencere.set_authors([YAZAR])
+    pencere.set_copyright("© 2026 " + YAZAR)
+    pencere.set_license_type(Gtk.License.MIT_X11)
+    pencere.set_logo_icon_name("system-shutdown")
+    pencere.run()
+    pencere.destroy()
+
+
+# --------------------------------------------------------------------------
+# Kısayol kurulumu (GNOME)
+# --------------------------------------------------------------------------
+
+def _sema_var_mi(ad):
+    return Gio.SettingsSchemaSource.get_default().lookup(ad, True) is not None
+
+
+def _normalize(tus):
+    """Kısayolu karşılaştırılabilir hale getirir; geçersizse None döner."""
+    anahtar, kip = Gtk.accelerator_parse(tus)
+    if anahtar == 0:
+        return None
+    return (anahtar, int(kip))
+
+
+def _tus_etiketi(tus):
+    """'<Super>k' -> 'Super+K'"""
+    anahtar, kip = Gtk.accelerator_parse(tus)
+    return Gtk.accelerator_get_label(anahtar, kip)
+
+
+def _program_yolu():
+    """Kısayola yazılacak komutu bulur. (yol, kurulu_mu) döner."""
+    yol = shutil.which(PROGRAM)
+    if yol:
+        return os.path.abspath(yol), True
+    return os.path.abspath(__file__), False
+
+
+def _ozel_ayar(yol):
+    return Gio.Settings.new_with_path(OZEL_SEMA, yol)
+
+
+def _kendi_yollarim(yollar):
+    """Özel kısayol listesinde bu programa ait olan girdiler."""
+    return [
+        y for y in yollar
+        if os.path.basename(_ozel_ayar(y).get_string("command")) == PROGRAM
+    ]
+
+
+def _cakisma_bul(tus, haric=()):
+    """Aynı tuşu kullanan kısayolları açıklamalarıyla döndürür."""
+    hedef = _normalize(tus)
+    kaynak = Gio.SettingsSchemaSource.get_default()
+    bulunan = []
+
+    for sema_adi in KISAYOL_SEMALARI:
+        sema = kaynak.lookup(sema_adi, True)
+        if sema is None:
+            continue
+        ayar = Gio.Settings.new(sema_adi)
+        for anahtar in sema.list_keys():
+            tur = sema.get_key(anahtar).get_value_type().dup_string()
+            if tur == "as":
+                degerler = ayar.get_strv(anahtar)
+            elif tur == "s":
+                degerler = [ayar.get_string(anahtar)]
+            else:
+                continue
+            if any(_normalize(d) == hedef for d in degerler if d):
+                bulunan.append("%s (%s)" % (anahtar, sema_adi))
+
+    if _sema_var_mi(MEDIA_KEYS):
+        for yol in Gio.Settings.new(MEDIA_KEYS).get_strv("custom-keybindings"):
+            if yol in haric:
+                continue
+            ozel = _ozel_ayar(yol)
+            if _normalize(ozel.get_string("binding") or "") == hedef:
+                bulunan.append("özel kısayol '%s'" % ozel.get_string("name"))
+    return bulunan
+
+
+def kisayol_kur(tus=VARSAYILAN_TUS):
+    """Kapatma penceresini verilen tuşa bağlar. (yol, komut, kurulu_mu) döner."""
+    if not (_sema_var_mi(MEDIA_KEYS) and _sema_var_mi(OZEL_SEMA)):
+        raise HataMesaji(
+            "GNOME kısayol ayarları bulunamadı. Bu özellik yalnızca GNOME'da "
+            "çalışır. Başka bir masaüstündeyseniz klavye ayarlarından "
+            "'%s' komutunu istediğiniz tuşa elle atayın." % PROGRAM
+        )
+    if _normalize(tus) is None:
+        raise HataMesaji("Geçersiz tuş: %s (örnek: <Super>k)" % tus)
+
+    ana = Gio.Settings.new(MEDIA_KEYS)
+    yollar = list(ana.get_strv("custom-keybindings"))
+    onceki = _kendi_yollarim(yollar)
+
+    cakisanlar = _cakisma_bul(tus, haric=onceki)
+    if cakisanlar:
+        raise HataMesaji(
+            "%s zaten kullanılıyor: %s\n"
+            "Başka bir tuş seçmek için: %s --kisayol-kur --tus '<Super>j'"
+            % (_tus_etiketi(tus), ", ".join(cakisanlar), PROGRAM)
+        )
+
+    if onceki:
+        yol = onceki[0]
+    else:
+        n = 0
+        while OZEL_YOL % n in yollar:
+            n += 1
+        yol = OZEL_YOL % n
+
+    komut, kurulu = _program_yolu()
+    ayar = _ozel_ayar(yol)
+    ayar.set_string("name", "Bilgisayarı Kapat (%s)" % UYGULAMA_ADI)
+    ayar.set_string("command", komut)
+    ayar.set_string("binding", tus)
+    # Girdi tamamen yazıldıktan sonra listeye eklenir.
+    if yol not in yollar:
+        ana.set_strv("custom-keybindings", yollar + [yol])
+    Gio.Settings.sync()
+    return yol, komut, kurulu
+
+
+def kisayol_kaldir():
+    """Bu programın eklediği kısayolları siler. Silinen sayısını döndürür."""
+    if not _sema_var_mi(MEDIA_KEYS):
+        return 0
+    ana = Gio.Settings.new(MEDIA_KEYS)
+    yollar = list(ana.get_strv("custom-keybindings"))
+    silinecek = _kendi_yollarim(yollar)
+    if not silinecek:
+        return 0
+    ana.set_strv("custom-keybindings", [y for y in yollar if y not in silinecek])
+    for yol in silinecek:
+        ayar = _ozel_ayar(yol)
+        for anahtar in ("name", "command", "binding"):
+            ayar.reset(anahtar)
+    Gio.Settings.sync()
+    return len(silinecek)
+
+
+# --------------------------------------------------------------------------
+# Komut satırı
+# --------------------------------------------------------------------------
+
+def _ekran_var_mi():
+    return Gdk.Display.get_default() is not None
+
+
+def bildir(mesaj, hata=False):
+    """Mesajı terminale yazar; terminal yoksa pencerede de gösterir."""
+    print(mesaj, file=sys.stderr if hata else sys.stdout)
+    if sys.stdout.isatty() or not _ekran_var_mi():
+        return
+    pencere = Gtk.MessageDialog(
+        message_type=Gtk.MessageType.ERROR if hata else Gtk.MessageType.INFO,
+        buttons=Gtk.ButtonsType.OK,
+        text=UYGULAMA_ADI,
+    )
+    pencere.format_secondary_text(mesaj)
+    pencere.run()
+    pencere.destroy()
+
+
+def _ayristir(argv):
+    ap = argparse.ArgumentParser(
+        prog=PROGRAM, add_help=False, description=ACIKLAMA + ". Yazan: " + YAZAR
+    )
+    ap.add_argument("-h", "--yardim", action="help", help="Bu yardım iletisini gösterir")
+    ap.add_argument(
+        "--surum", action="version",
+        version="%s %s - %s" % (UYGULAMA_ADI, SURUM, YAZAR),
+        help="Sürüm bilgisini gösterir",
+    )
+    ap.add_argument(
+        "--deneme", action="store_true",
+        help="Pencereyi gösterir ama bilgisayarı kapatmaz",
+    )
+    ap.add_argument("--hakkinda", action="store_true", help="Hakkında penceresini açar")
+    grup = ap.add_mutually_exclusive_group()
+    grup.add_argument(
+        "--kisayol-kur", action="store_true",
+        help="Süper+K kısayolunu GNOME'a ekler (--tus ile değiştirilebilir)",
+    )
+    grup.add_argument(
+        "--kisayol-kaldir", action="store_true",
+        help="Bu programın eklediği kısayolu kaldırır",
+    )
+    ap.add_argument(
+        "--tus", default=VARSAYILAN_TUS, metavar="TUŞ",
+        help="Kısayol tuşu, GNOME biçiminde (varsayılan: %s)" % VARSAYILAN_TUS,
+    )
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    args = _ayristir(argv)
+
+    if args.kisayol_kur:
+        try:
+            _, komut, kurulu = kisayol_kur(args.tus)
+        except HataMesaji as e:
+            bildir(str(e), hata=True)
+            return 1
+        mesaj = "%s kısayolu kuruldu.\nÇalışacak komut: %s" % (_tus_etiketi(args.tus), komut)
+        if not kurulu:
+            mesaj += (
+                "\n\nUyarı: %s sisteme kurulu değil, kısayol bu dosyanın "
+                "bulunduğu yere bağlandı. Dosyayı taşırsanız kısayol bozulur."
+                % PROGRAM
+            )
+        bildir(mesaj)
+        return 0
+
+    if args.kisayol_kaldir:
+        adet = kisayol_kaldir()
+        bildir("Kısayol kaldırıldı." if adet else "Kaldırılacak bir kısayol bulunamadı.")
+        return 0
+
+    if args.hakkinda:
+        hakkinda_goster()
+        return 0
+
+    if not onay_sor():
+        return 0
+    if not bilgisayari_kapat(deneme=args.deneme):
+        bildir("Kapatma komutu çalıştırılamadı.", hata=True)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
